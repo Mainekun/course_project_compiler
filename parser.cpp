@@ -2,6 +2,12 @@
 #include <string>
 
 [[nodiscard]] bool Parser::analyze() {
+    qsizetype the_largest_rule = rules[0].len();
+    foreach(auto& rule, rules) {
+        if (the_largest_rule < rule.len())
+            the_largest_rule = rule.len();
+    }
+
     QList<Lexema> observe_list;
 
     foreach(auto i, __lexer->get_tokenized_code())
@@ -36,34 +42,23 @@
             __line.pop_front();
         }
         else {
-            while(__stack.length() > 1) {
-                observe_list.push_front(__stack.pop());
+            Rule the_best_rule = Rule();
 
-                qsizetype seq_size = observe_list.length();
-                foreach (auto rule, rules) {
-                    if (rule.len() != seq_size)
-                        continue;
+            foreach (auto& rule, rules) {
+                if (__stack.size() - 1 < rule.len())
+                    continue;
 
-                    if (!(rule == observe_list))
-                        continue;
-
-                    if (rule.name() == "atom_pars" && Lexema::is_op(__stack.top())
-                        || rule.name() == "ids" && __stack.top().value() == "="
-                        || rule.name() == "id" && Lexema::is_arithm(__stack.top())
-                        //|| rule.name() == "ops1" && __stack.at(__stack.length() - 2).value() == "OS"
-                        //|| rule.name() == "ids" && Lexema::is_arithm(__stack.top())
-                        )
-                        continue;
-
-                    __conv_seq.push_back(rule.name());
-                    observe_list.clear();
-                    __stack.push(rule());
-                    goto rulewasfound;
-                }
-
+                if (rule.check_stack(&__stack))
+                    if (the_best_rule.len() < rule.len()) the_best_rule = rule;
             }
 
-            throw std::runtime_error("NoRuleForSequanceException");
+            if (the_best_rule.empty())
+                throw std::runtime_error("NoRuleForSequanceException");
+
+            for (int i = 0; i < the_best_rule.len(); i++)
+                __stack.pop();
+
+            __stack.push(the_best_rule());
 
             rulewasfound:
         }

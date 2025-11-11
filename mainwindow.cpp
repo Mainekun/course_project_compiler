@@ -3,7 +3,7 @@
 
 #include <QFileDialog>
 
-#define DEBUG_FILE
+// #define DEBUG_FILE
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -95,10 +95,17 @@ void MainWindow::on_runButton_released()
         }
 
         if (parser.analyze())
-            ;
+            ui->infoEdit->setText(tr("Parsing succeeded!"));
     }
     catch(std::exception& e) {
         ui->statusbar->showMessage(e.what(), 10000);
+        ui->infoEdit->setText([&]()->QString{
+            QString r;
+            foreach (auto& i, parser.conv_seq())
+                r += i + "\n";
+
+            return r;
+        }());
     }
 
 }

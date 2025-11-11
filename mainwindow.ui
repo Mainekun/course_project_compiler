@@ -108,7 +108,7 @@
           </property>
           <layout class="QHBoxLayout" name="horizontalLayout_5">
            <item>
-            <widget class="QTextEdit" name="textEdit"/>
+            <widget class="QTextEdit" name="infoEdit"/>
            </item>
           </layout>
          </widget>
