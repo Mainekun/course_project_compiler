@@ -3,7 +3,7 @@
 
 #include <QFileDialog>
 
-// #define DEBUG_FILE
+//#define DEBUG_FILE
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -60,7 +60,10 @@ void MainWindow::on_useTextButton_released()
 void MainWindow::on_runButton_released()
 {
     try {
-        lexer.analyze();
+        if (lexer.analyze())
+            ui->infoEdit->setText(tr("Tokenization succeeded!\nLexemas count: %1\n")
+                .arg(lexer.get_tokenized_code().length()));
+
         ui->statusbar->showMessage(
             QString("Succeeded. Lexemas count : %1")
                 .arg(lexer.get_tokenized_code().length()),
@@ -95,16 +98,78 @@ void MainWindow::on_runButton_released()
         }
 
         if (parser.analyze())
-            ui->infoEdit->setText(tr("Parsing succeeded!"));
+            ui->infoEdit->append(tr("Parsing succeeded!\nConvolution sequance:"));
+
+        ui->infoEdit->append([&]()->QString{
+            QString r;
+            foreach (auto& i, parser.conv_sequance())
+                r += tr("%1: %2\n").arg(i.first).arg([&](){
+                    QString buff;
+                    foreach (auto lex, i.second) {
+                        buff += (lex.value() == "a"
+                                     ? lex.const_name() :
+                                     lex.value())  + " ";
+                    }
+
+                    return buff;
+                }());
+
+            return r;
+        }());
+
+        if (parser.hasSemanticErrors())
+            ui->infoEdit->append(
+                parser.getSemanticErrors().join("\n"));
+        else
+            ui->infoEdit->append("Semantic analysis succceeded");
+
+        ASTAssemblerGenerator asmgen;
+        ASTNode* tree = parser.getSyntaxTree();
+
+        QList<QString> asmcode;
+
+
+        if (tree) {
+            QList<QString> assembly = asmgen.generateFromAST(tree);
+            asmcode = asmgen.generateFromAST(tree);
+
+            QString resname = lexer.filename();
+
+            QFile resfile = QFile(resname);
+            if (resfile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                QTextStream out(&resfile);
+                for (const auto& line : asmcode) {
+                    out << line << "\n";
+                }
+                resfile.close();
+                qDebug() << "Assembly code saved to" << resname;
+            } else {
+                qDebug() << "Failed to save assembly code to" << resname;
+            }
+        }
+
+
+
+
+
     }
     catch(std::exception& e) {
         ui->statusbar->showMessage(e.what(), 10000);
         ui->infoEdit->setText([&]()->QString{
             QString r;
-            foreach (auto& i, parser.conv_seq())
-                r += i + "\n";
+            foreach (auto& i, parser.conv_sequance())
+                r += tr("%1: %2\n").arg(i.first).arg([&](){
+                    QString buff;
+                    foreach (auto lex, i.second) {
+                        buff += (lex.value() == "a"
+                                     ? lex.const_name() :
+                                     lex.value())  + " ";
+                    }
 
-            return r;
+                    return buff;
+                }());
+
+            return r += tr("\n") + tr(e.what());
         }());
     }
 

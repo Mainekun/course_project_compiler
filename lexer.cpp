@@ -31,6 +31,9 @@ bool Lexer::loadText(QString& text) {
     Returns true if no errors occured, false otherwise.
 */
 bool Lexer::analyze() {
+    tokenized_code.clear();
+    token_tables.clear();
+
     QTextStream in;
     QFile* code;
     if (is_reading_from_file) {
@@ -45,6 +48,8 @@ bool Lexer::analyze() {
     QChar ch;
     QString word;
     Lexema cand;
+    QChar s1, s2;
+
     while (!in.atEnd()) {
         ch = in.read(1).at(0);
 
@@ -68,13 +73,14 @@ bool Lexer::analyze() {
 
             cand = Lexema(word);
             if (cand.type() == TokenType::Error)
-                throw std::runtime_error("InvalidTokenError");
+                throw std::runtime_error(QString("Invalid token: %1").arg(cand.value()).toStdString());
 
             register_lexema(cand);
             word = "";
 
             break;
         case 1:
+            appendingletters:
             word += ch;
 
             break;
@@ -87,9 +93,30 @@ bool Lexer::analyze() {
                 throw std::runtime_error("InvalidTokenValue");
 
             register_lexema(cand);
-            word = "";
+
 
             onlydelimeter:
+
+            // if (ch == '-' && word == "") {
+            //     if (in.read(1).at(0).isDigit()) {
+            //         in.seek(in.pos() - 1);
+            //         goto appendingletters;
+            //     }
+            //     else
+            //         in.seek(in.pos() - 1);
+            // }
+
+            word = "";
+
+
+            if (s1 = ch, s2 = in.read(1).at(0), s1 == '/' && s2 == '*') {
+                while(s1 = in.read(1).at(0), s2 = in.read(1).at(0), s1 != '*' || s2 != '/')
+                    in.seek(in.pos() - 1);
+
+                goto endcomment;
+            }
+            else
+                in.seek(in.pos()-1);
 
             word += ch;
             cand = Lexema(word);
@@ -99,6 +126,7 @@ bool Lexer::analyze() {
             register_lexema(cand);
             word = "";
 
+            endcomment:
             break;
         case 3:
 

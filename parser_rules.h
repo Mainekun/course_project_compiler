@@ -12,8 +12,6 @@
     0 - =.
     -1 - <.
 */
-
-
 static QMap<QString, QMap<QString, int>> parser_rules = {
     {
         "program",
@@ -251,13 +249,17 @@ static QMap<QString, QMap<QString, int>> parser_rules = {
          {"=", 1},
          {")", 1},
          {"else", 1},
-         {"then", 1},
+         {"then", -1},
+         {"a", 1},
+         {";", 1},
          }
     },
     {
         "then",
         {
-            {"end", 1}
+         {")", -1},
+         {"end", 1},
+         {"else", -1},
         }
     },
     {
@@ -302,6 +304,11 @@ static QMap<QString, QMap<QString, int>> parser_rules = {
          {"(", 0},
          {")", 1},
          {";", -1},
+         {",", 1},
+         {"*", 1},
+         {"+", 1},
+         {"-", 1},
+         {"/", 1},
          }
     },
     {
@@ -319,14 +326,32 @@ static QMap<QString, QMap<QString, int>> parser_rules = {
     }
 };
 
+enum class RuleType {
+    PROGRAM,
+    VAR,
+    ID,
+    EXPR,
+    OUT,
+    IN,
+    IF,
+    IF_ELSE,
+    FOR,
+    WHILE,
+    LET,
+    BLOCK,
+    E,
+    NEG,
+};
+
 class Rule {
     QList<Lexema> __seq;
     QString __name;
     Lexema (*__return)();
+    RuleType __type;
 
 public:
-    Rule() : __name("???"), __return([](){return Lexema("???", TokenType::Error);}) {};
-    Rule(QString name) : __name(name), __return([](){return Lexema("???", TokenType::Error);}) {}
+    Rule() : __name("???"), __type(RuleType::PROGRAM), __return([](){return Lexema("???", TokenType::Error);}) {};
+    Rule(QString name, RuleType type) : __name(name), __type(type), __return([](){return Lexema("???", TokenType::Error);}) {}
 
     Rule& push_back(Lexema lex) {
         __seq.push_back(lex);
@@ -381,10 +406,13 @@ public:
     qsizetype len() const { return __seq.length(); }
 
     Lexema operator()() { return __return(); }
+
+    RuleType type() const { return __type; }
 };
 
 inline QList<Rule> rules = {
-    Rule("program").push_back(Lexema::PROGRAM())
+    Rule("program", RuleType::PROGRAM)
+        .push_back(Lexema::PROGRAM())
         .push_back(Lexema::A())
         .push_back(Lexema::E())
         .push_back(Lexema::BEGIN())
@@ -393,34 +421,34 @@ inline QList<Rule> rules = {
         .push_back(Lexema::DOT())
         .ret(Lexema::E),
 
-    Rule("description").push_back(Lexema::VAR())
+    Rule("description", RuleType::VAR).push_back(Lexema::VAR())
         .push_back(Lexema::E())
         .push_back(Lexema::INT())
         .ret(Lexema::E),
 
-    Rule("ids").push_back(Lexema::E())
+    Rule("atoms", RuleType::E).push_back(Lexema::E())
         .push_back(Lexema::COM())
         .push_back(Lexema::E())
         .ret(Lexema::E),
 
-    Rule("block").push_back(Lexema::BEGIN())
+    Rule("block_op", RuleType::BLOCK).push_back(Lexema::BEGIN())
         .push_back(Lexema::E())
         .push_back(Lexema::END())
         .ret(Lexema::E),
 
-    Rule("input").push_back(Lexema::INPUT())
+    Rule("input_op", RuleType::IN).push_back(Lexema::INPUT())
         .push_back(Lexema::LPAR())
         .push_back(Lexema::E())
         .push_back(Lexema::RPAR())
         .ret(Lexema::E),
 
-    Rule("output").push_back(Lexema::OUTPUT())
+    Rule("output_op", RuleType::OUT).push_back(Lexema::OUTPUT())
         .push_back(Lexema::LPAR())
         .push_back(Lexema::E())
         .push_back(Lexema::RPAR())
         .ret(Lexema::E),
 
-    Rule("for").push_back(Lexema::FOR())
+    Rule("for_op", RuleType::FOR).push_back(Lexema::FOR())
         .push_back(Lexema::LPAR())
         .push_back(Lexema::E())
         .push_back(Lexema::SEMICOLON())
@@ -431,14 +459,14 @@ inline QList<Rule> rules = {
         .push_back(Lexema::E())
         .ret(Lexema::E),
 
-    Rule("while").push_back(Lexema::WHILE())
+    Rule("while_op", RuleType::WHILE).push_back(Lexema::WHILE())
         .push_back(Lexema::LPAR())
         .push_back(Lexema::E())
         .push_back(Lexema::RPAR())
         .push_back(Lexema::E())
         .ret(Lexema::E),
 
-    Rule("if").push_back(Lexema::IF())
+    Rule("if_op", RuleType::IF).push_back(Lexema::IF())
         .push_back(Lexema::LPAR())
         .push_back(Lexema::E())
         .push_back(Lexema::RPAR())
@@ -446,7 +474,7 @@ inline QList<Rule> rules = {
         .push_back(Lexema::E())
         .ret(Lexema::E),
 
-    Rule("if-else").push_back(Lexema::IF())
+    Rule("if-else_op", RuleType::IF_ELSE).push_back(Lexema::IF())
         .push_back(Lexema::LPAR())
         .push_back(Lexema::E())
         .push_back(Lexema::RPAR())
@@ -456,13 +484,13 @@ inline QList<Rule> rules = {
         .push_back(Lexema::E())
         .ret(Lexema::E),
 
-    Rule("let").push_back(Lexema::LET())
+    Rule("definition_op", RuleType::LET).push_back(Lexema::LET())
         .push_back(Lexema::A())
         .push_back(Lexema::EQU())
         .push_back(Lexema::E())
         .ret(Lexema::E),
 
-    Rule("ops").push_back(Lexema::E())
+    Rule("ops", RuleType::E).push_back(Lexema::E())
         .push_back(Lexema::SEMICOLON())
         .push_back(Lexema::E())
         .ret(Lexema::E),
@@ -472,12 +500,12 @@ inline QList<Rule> rules = {
     //    .push_back(Lexema::E())
     //    .ret(Lexema::E),
 
-    Rule("term_sum").push_back(Lexema::E())
+    Rule("term_sum", RuleType::EXPR).push_back(Lexema::E())
         .push_back(Lexema::SUM())
         .push_back(Lexema::E())
         .ret(Lexema::E),
 
-    Rule("term_dif").push_back(Lexema::E())
+    Rule("term_dif", RuleType::EXPR).push_back(Lexema::E())
         .push_back(Lexema::DIF())
         .push_back(Lexema::E())
         .ret(Lexema::E),
@@ -491,17 +519,17 @@ inline QList<Rule> rules = {
     //Rule("atom").push_back(Lexema::A())
     //    .ret(Lexema::T),
 
-    Rule("factor_mul").push_back(Lexema::E())
+    Rule("factor_mul", RuleType::EXPR).push_back(Lexema::E())
         .push_back(Lexema::MUL())
         .push_back(Lexema::E())
         .ret(Lexema::E),
 
-    Rule("factor_div").push_back(Lexema::F())
+    Rule("factor_div", RuleType::EXPR).push_back(Lexema::E())
         .push_back(Lexema::DIV())
         .push_back(Lexema::E())
-        .ret(Lexema::F),
+        .ret(Lexema::E),
 
-    Rule("atom_pars").push_back(Lexema::LPAR())
+    Rule("atom_pars", RuleType::EXPR).push_back(Lexema::LPAR())
         .push_back(Lexema::E())
         .push_back(Lexema::RPAR())
         .ret(Lexema::E),
@@ -509,7 +537,11 @@ inline QList<Rule> rules = {
     //Rule("ids").push_back(Lexema::E())
     //    .ret(Lexema::E),
 
-    Rule("id").push_back(Lexema::A())
+    Rule("atom", RuleType::E).push_back(Lexema::A())
+        .ret(Lexema::E),
+
+    Rule("neg_num", RuleType::NEG).push_back(Lexema::DIF())
+        .push_back(Lexema::E())
         .ret(Lexema::E),
 };
 

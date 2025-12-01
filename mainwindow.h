@@ -8,6 +8,8 @@
 
 #include "lexer.h"
 #include "parser.h"
+#include "sema.h"
+#include "translation.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui {

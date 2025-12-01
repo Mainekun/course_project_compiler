@@ -32,7 +32,9 @@ add_executable(dslgui ${PROJECT_SOURCES}
     lexer.h lexer.cpp
     parser.h parser.cpp
     parser_rules.h
-    sema.h sema.cpp)
+    sema.h sema.cpp
+    translation.h translation.cpp
+    syntaxtree.h syntaxtree.cpp)
 
 if(QT_VERSION_MAJOR EQUAL 6)
     target_link_libraries(dslgui PRIVATE

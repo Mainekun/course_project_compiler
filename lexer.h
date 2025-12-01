@@ -39,6 +39,8 @@ inline QMap<QString, TokenType> lexemas_associations = {
     {"for", TokenType::Word},
     {"while", TokenType::Word},
     {"if", TokenType::Word},
+    {"else", TokenType::Word},
+    {"then", TokenType::Word},
     {"let", TokenType::Word},
     {"(", TokenType::Delimeter},
     {")", TokenType::Delimeter},
@@ -53,7 +55,7 @@ inline QMap<QString, TokenType> lexemas_associations = {
 };
 
 inline QString id_pattern = "^\\w\\d*\\w$";
-inline QString const_pattern = "^\\d+$";
+inline QString const_pattern = "^(\\d+|-\\d+)$"; // "^\\d+$";
 inline QList<QString> spec_op_words = {
     "input",
     "output"
@@ -63,6 +65,7 @@ class Lexema {
 
     QString __value;
     TokenType __type;
+    QString __name = "";
 
 public:
     Lexema() {}
@@ -71,6 +74,10 @@ public:
 
     QString value() const { return __value; }
     TokenType type() const { return __type; }
+    Lexema& setValue(QString value) { __value = value; return *this; }
+    Lexema& setType(TokenType type) { __type = type; return *this; }
+    QString const_name() const { return __name; }
+    Lexema& set_name(QString name) { __name = name; return *this; }
 
     QString toQString() { return QString("(\"%1\", %2)\n")
                               .arg(__value, token_type_to_qstring[__type]) ; }
@@ -110,6 +117,9 @@ public:
     }
 
     bool operator==(const Lexema& lex) const {
+        if ((__type == TokenType::Const && lex.__type == TokenType::Const) ||
+            (__type == TokenType::Id && lex.__type == TokenType::Id))
+            return true;
         if (__type == lex.__type && __value == lex.__value)
             return true;
         return false;
@@ -139,17 +149,7 @@ public:
     static Lexema COM() { return Lexema(","); }
     static Lexema SEMICOLON() { return Lexema(";"); }
     static Lexema A() { return Lexema("a", TokenType::Id); }
-    static Lexema AS() { return Lexema("as", TokenType::Nonterminal); }
-    static Lexema C() { return Lexema("C", TokenType::Nonterminal); }
     static Lexema E() { return Lexema("E", TokenType::Nonterminal); }
-    static Lexema F() { return Lexema("F", TokenType::Nonterminal); }
-    static Lexema T() { return Lexema("T", TokenType::Nonterminal); }
-    static Lexema ES() { return Lexema("ES", TokenType::Nonterminal); }
-    static Lexema O() { return Lexema("O", TokenType::Nonterminal); }
-    static Lexema OS() { return Lexema("OS", TokenType::Nonterminal); }
-    static Lexema P() { return Lexema("P", TokenType::Nonterminal); }
-    static Lexema D() { return Lexema("D", TokenType::Nonterminal); }
-    static Lexema I() { return Lexema("I", TokenType::Nonterminal); }
 };
 
 
@@ -193,6 +193,14 @@ public:
         foreach (auto i, token_types)
             token_tables[i] = {};
     };
+
+    bool is_read_from_file() { return is_reading_from_file; }
+    QString filename() {
+        if (is_reading_from_file)
+            return source_code.append(".asm");
+        else
+            return QString::fromStdString("a.asm");
+    }
 
     QList<Lexema>& get_tokenized_code() { return tokenized_code; }
     QList<Lexema>& get_words() { return token_tables["words"]; }
