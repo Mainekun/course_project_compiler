@@ -123,30 +123,8 @@ void MainWindow::on_runButton_released()
         else
             ui->infoEdit->append("Semantic analysis succceeded");
 
-        ASTAssemblerGenerator asmgen;
-        ASTNode* tree = parser.getSyntaxTree();
-
-        QList<QString> asmcode;
-
-
-        if (tree) {
-            QList<QString> assembly = asmgen.generateFromAST(tree);
-            asmcode = asmgen.generateFromAST(tree);
-
-            QString resname = lexer.filename();
-
-            QFile resfile = QFile(resname);
-            if (resfile.open(QIODevice::WriteOnly | QIODevice::Text)) {
-                QTextStream out(&resfile);
-                for (const auto& line : asmcode) {
-                    out << line << "\n";
-                }
-                resfile.close();
-                qDebug() << "Assembly code saved to" << resname;
-            } else {
-                qDebug() << "Failed to save assembly code to" << resname;
-            }
-        }
+        AsmGenerator asmgen(&lexer);
+        asmgen.generate(lexer.filename()+".asm");
 
 
 
