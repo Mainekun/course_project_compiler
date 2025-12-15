@@ -124,11 +124,7 @@ void MainWindow::on_runButton_released()
             ui->infoEdit->append("Semantic analysis succceeded");
 
         AsmGenerator asmgen(&lexer);
-        asmgen.generate(lexer.filename()+".asm");
-
-
-
-
+        asmgen.generate(lexer.filename());
 
     }
     catch(std::exception& e) {

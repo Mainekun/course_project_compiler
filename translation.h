@@ -6,15 +6,35 @@
 #include <QMap>
 #include <QFile>
 #include <QTextStream>
+#include <QStack>
+#include <QSet>
 
 class AsmGenerator {
 private:
     Lexer* __lexer;
-    QMap<QString, int> __variable_sizes; // variable name -> size in bytes
-    QMap<QString, QString> __variable_types; // variable name -> type
+    QMap<QString, int> __variable_sizes;
+    QMap<QString, QString> __variable_types;
     QList<QString> __generated_code;
+    QStack<QString> __loop_labels;
+    QStack<QString> __if_labels;
     int __label_counter = 0;
     int __temp_counter = 0;
+    int __loop_depth = 0;
+    int __if_depth = 0;
+    int __current_token_index = 0;
+    QString __current_program_name;
+    QSet<QString> __declared_variables;
+    bool __in_program = false;
+
+    struct LoopContext {
+        QString start_label;
+        QString end_label;
+        QString condition_label;
+        bool is_for_loop = false;
+        QString increment_code;
+    };
+
+    QStack<LoopContext> __loop_contexts;
 
 public:
     AsmGenerator(Lexer* lex) : __lexer(lex) {}
@@ -23,23 +43,24 @@ public:
         __generated_code.clear();
         __label_counter = 0;
         __temp_counter = 0;
+        __loop_depth = 0;
+        __if_depth = 0;
+        __current_token_index = 0;
+        __current_program_name.clear();
+        __declared_variables.clear();
+        __in_program = false;
+        __loop_contexts.clear();
+        __loop_labels.clear();
+        __if_labels.clear();
 
-        // Generate data section
         generateDataSection();
-
-        // Generate code section
         generateCodeSection();
 
-        // Write to file
         return writeToFile(output_filename);
     }
 
-    QString getNextLabel() {
-        return QString("L%1").arg(__label_counter++);
-    }
-
-    QString getNextTemp() {
-        return QString("T%1").arg(__temp_counter++);
+    QString getNextLabel(const QString& prefix = "L") {
+        return QString("%1%2").arg(prefix).arg(__label_counter++);
     }
 
 private:
@@ -57,19 +78,6 @@ private:
             __generated_code.append(QString("    %1 dd %2").arg(const_name, lex.value()));
         }
 
-        // Process identifiers (variables)
-        auto ids = __lexer->get_ids();
-        for (const auto& lex : ids) {
-            QString var_name = lex.value();
-
-            // Check if this is declared as a variable (should be in var section in actual code)
-            // For now, assume all ids are integer variables
-            __variable_sizes[var_name] = 4; // 4 bytes for integer
-            __variable_types[var_name] = "dd";
-
-            __generated_code.append(QString("    %1 %2 0").arg(var_name, __variable_types[var_name]));
-        }
-
         __generated_code.append("");
     }
 
@@ -80,28 +88,15 @@ private:
         __generated_code.append("_start:");
         __generated_code.append("");
 
-        // Process tokenized code to generate instructions
         auto tokens = __lexer->get_tokenized_code();
+        __current_token_index = 0;
 
-        for (int i = 0; i < tokens.size(); i++) {
-            auto& token = tokens[i];
+        // Reset state for new program
+        resetProgramState();
 
-            switch (token.type()) {
-            case TokenType::Word:
-                handleKeyword(token, i, tokens);
-                break;
-            case TokenType::Delimeter:
-                handleDelimeter(token, i, tokens);
-                break;
-            case TokenType::Id:
-                handleIdentifier(token, i, tokens);
-                break;
-            case TokenType::Const:
-                handleConstant(token, i, tokens);
-                break;
-            default:
-                break;
-            }
+        // Process all tokens
+        while (__current_token_index < tokens.size()) {
+            processToken(tokens);
         }
 
         // Add program exit
@@ -110,176 +105,610 @@ private:
         __generated_code.append("    mov eax, 1      ; sys_exit");
         __generated_code.append("    xor ebx, ebx    ; exit code 0");
         __generated_code.append("    int 0x80");
+        __generated_code.append("");
+
+        generateHelperFunctions();
     }
 
-    void handleKeyword(const Lexema& token, int index, const QList<Lexema>& tokens) {
-        QString keyword = token.value();
+    void resetProgramState() {
+        __loop_depth = 0;
+        __if_depth = 0;
+        __loop_contexts.clear();
+        __loop_labels.clear();
+        __if_labels.clear();
+        __declared_variables.clear();
+        __in_program = false;
+        __current_program_name.clear();
+    }
 
-        if (keyword == "program") {
-            __generated_code.append("    ; Program: " + (index + 1 < tokens.size() ? tokens[index + 1].value() : ""));
+    void processToken(const QList<Lexema>& tokens) {
+        auto& token = tokens[__current_token_index];
+
+        if (token.value() == "program") {
+            // Start of a new program
+            if (__in_program) {
+                // Close previous program if any
+                closeAllBlocks();
+            }
+
+            resetProgramState();
+            __in_program = true;
+
+            if (__current_token_index + 1 < tokens.size()) {
+                __current_program_name = tokens[__current_token_index + 1].value();
+                __generated_code.append("");
+                __generated_code.append(QString("    ; Program: %1").arg(__current_program_name));
+            }
+
+            __current_token_index += 2; // Skip "program" and program name
         }
-        else if (keyword == "var") {
-            __generated_code.append("    ; Variable declarations");
+        else if (token.value() == "var") {
+            // Variable declaration section
+            __current_token_index++; // Skip "var"
+
+            // Collect variable names until "int" or "integer"
+            while (__current_token_index < tokens.size()) {
+                QString token_value = tokens[__current_token_index].value();
+
+                if (token_value == "int" || token_value == "integer") {
+                    __current_token_index++; // Skip "int" or "integer"
+                    break;
+                }
+
+                if (token.type() == TokenType::Id || token.type() == TokenType::Word) {
+                    if (token_value != ",") {
+                        __declared_variables.insert(token_value);
+                        // Declare variable in .bss section
+                        if (!__variable_sizes.contains(token_value)) {
+                            __variable_sizes[token_value] = 4;
+                            __variable_types[token_value] = "dd";
+                        }
+                    }
+                }
+
+                __current_token_index++;
+            }
         }
-        else if (keyword == "begin") {
+        else if (token.value() == "begin") {
+            __current_token_index++;
             __generated_code.append("    ; Begin main block");
         }
-        else if (keyword == "end") {
-            __generated_code.append("    ; End main block");
-        }
-        else if (keyword == "input") {
-            // Generate input code
-            if (index + 3 < tokens.size() && tokens[index + 1].value() == "(") {
-                QString var_name = tokens[index + 2].value();
-                generateInputCode(var_name);
+        else if (token.value() == "end") {
+            // Check if it's "end." (end of program)
+            if (__current_token_index + 1 < tokens.size() &&
+                tokens[__current_token_index + 1].value() == ".") {
+                closeAllBlocks();
+                __current_token_index += 2; // Skip "end" and "."
+                __generated_code.append("    ; End program");
+                __in_program = false;
+                return;
             }
-        }
-        else if (keyword == "output") {
-            // Generate output code
-            if (index + 3 < tokens.size() && tokens[index + 1].value() == "(") {
-                QString expr = tokens[index + 2].value();
-                generateOutputCode(expr);
-            }
-        }
-        else if (keyword == "let") {
-            // Generate assignment code
-            if (index + 3 < tokens.size() && tokens[index + 2].value() == "=") {
-                QString var_name = tokens[index + 1].value();
-                QString value = tokens[index + 3].value();
-                generateAssignmentCode(var_name, value);
-            }
-        }
-    }
 
-    void handleDelimeter(const Lexema& token, int index, const QList<Lexema>& tokens) {
-        QString delim = token.value();
-
-        if (delim == ";") {
+            // Close current block
+            closeCurrentBlock();
+            __current_token_index++;
+        }
+        else if (token.value() == "if") {
+            processIfStatement(tokens);
+        }
+        else if (token.value() == "else") {
+            processElseStatement(tokens);
+        }
+        else if (token.value() == "while") {
+            processWhileLoop(tokens);
+        }
+        else if (token.value() == "for") {
+            processForLoop(tokens);
+        }
+        else if (token.value() == "let") {
+            processAssignment(tokens);
+        }
+        else if (token.value() == "input") {
+            processInput(tokens);
+        }
+        else if (token.value() == "output") {
+            processOutput(tokens);
+        }
+        else if (token.value() == "then") {
+            // Skip "then" keyword
+            __current_token_index++;
+        }
+        else if (token.value() == ";") {
             __generated_code.append("    ; Statement end");
+            __current_token_index++;
         }
-        else if (delim == "=") {
-            // Assignment operator - handled in keyword section
+        else if (token.type() == TokenType::Id && __declared_variables.contains(token.value())) {
+            // Variable reference - handled in other contexts
+            __current_token_index++;
         }
-        else if (Lexema::is_arithm(const_cast<Lexema&>(token))) {
-            // Arithmetic operation
-            if (index > 0 && index + 1 < tokens.size()) {
-                QString left = tokens[index - 1].value();
-                QString right = tokens[index + 1].value();
-                generateArithmeticCode(left, delim, right);
+        else {
+            __current_token_index++; // Skip other tokens
+        }
+    }
+
+    void processIfStatement(const QList<Lexema>& tokens) {
+        QString else_label = getNextLabel("ELSE_");
+        QString end_if_label = getNextLabel("END_IF_");
+
+        __if_labels.push(else_label);
+        __if_labels.push(end_if_label);
+
+        __generated_code.append("");
+        __generated_code.append("    ; If statement");
+
+        __current_token_index++; // Skip "if"
+
+        if (__current_token_index < tokens.size() && tokens[__current_token_index].value() == "(") {
+            __current_token_index++; // Skip "("
+
+            QString condition = extractCondition(tokens);
+            generateConditionCode(condition, else_label);
+
+            __current_token_index++; // Skip ")"
+        }
+    }
+
+    void processElseStatement(const QList<Lexema>& tokens) {
+        if (!__if_labels.isEmpty()) {
+            QString else_label = __if_labels.pop();
+            QString end_if_label = __if_labels.pop();
+
+            __generated_code.append("    jmp " + end_if_label);
+            __generated_code.append(else_label + ":");
+            __generated_code.append("    ; Else block");
+
+            __if_labels.push(end_if_label);
+        }
+        __current_token_index++;
+    }
+
+    void processWhileLoop(const QList<Lexema>& tokens) {
+        __loop_depth++;
+
+        LoopContext context;
+        context.start_label = getNextLabel("WHILE_START_");
+        context.end_label = getNextLabel("WHILE_END_");
+        context.condition_label = getNextLabel("WHILE_COND_");
+        context.is_for_loop = false;
+
+        __loop_contexts.push(context);
+
+        __generated_code.append("");
+        __generated_code.append("    ; While loop");
+        __generated_code.append(context.condition_label + ":");
+
+        __current_token_index++; // Skip "while"
+
+        if (__current_token_index < tokens.size() && tokens[__current_token_index].value() == "(") {
+            __current_token_index++; // Skip "("
+
+            QString condition = extractCondition(tokens);
+            generateConditionCode(condition, context.end_label);
+
+            __current_token_index++; // Skip ")"
+        }
+
+        __generated_code.append(context.start_label + ":");
+
+        // Check for "begin" after condition
+        if (__current_token_index < tokens.size() && tokens[__current_token_index].value() == "begin") {
+            __current_token_index++; // Skip "begin"
+        }
+    }
+
+    void processForLoop(const QList<Lexema>& tokens) {
+        __loop_depth++;
+
+        LoopContext context;
+        context.start_label = getNextLabel("FOR_START_");
+        context.end_label = getNextLabel("FOR_END_");
+        context.condition_label = getNextLabel("FOR_COND_");
+        context.is_for_loop = true;
+
+        __loop_contexts.push(context);
+
+        __generated_code.append("");
+        __generated_code.append("    ; For loop");
+
+        __current_token_index++; // Skip "for"
+
+        if (__current_token_index < tokens.size() && tokens[__current_token_index].value() == "(") {
+            __current_token_index++; // Skip "("
+
+            // Parse initialization
+            QString initialization = "";
+            while (__current_token_index < tokens.size() &&
+                   tokens[__current_token_index].value() != ";") {
+                initialization += tokens[__current_token_index].value() + " ";
+                __current_token_index++;
+            }
+            initialization = initialization.trimmed();
+
+            if (!initialization.isEmpty()) {
+                // Handle initialization (could be "1" or "let i = 0")
+                if (initialization != "1") { // Skip constant "1"
+                    processAssignmentFromString(initialization);
+                }
+            }
+
+            if (__current_token_index < tokens.size() && tokens[__current_token_index].value() == ";") {
+                __current_token_index++;
+            }
+
+            __generated_code.append(context.condition_label + ":");
+
+            // Parse condition
+            QString condition = "";
+            while (__current_token_index < tokens.size() &&
+                   tokens[__current_token_index].value() != ";") {
+                condition += tokens[__current_token_index].value() + " ";
+                __current_token_index++;
+            }
+            condition = condition.trimmed();
+
+            if (!condition.isEmpty() && condition != "1") { // Skip constant "1"
+                generateConditionCode(condition, context.end_label);
+            } else if (condition == "1") {
+                // Always true condition
+                __generated_code.append("    ; Always true condition");
+            }
+
+            if (__current_token_index < tokens.size() && tokens[__current_token_index].value() == ";") {
+                __current_token_index++;
+            }
+
+            // Parse increment
+            QString increment = "";
+            while (__current_token_index < tokens.size() &&
+                   tokens[__current_token_index].value() != ")") {
+                increment += tokens[__current_token_index].value() + " ";
+                __current_token_index++;
+            }
+            increment = increment.trimmed();
+            context.increment_code = increment;
+
+            if (__current_token_index < tokens.size() && tokens[__current_token_index].value() == ")") {
+                __current_token_index++;
+            }
+
+            __generated_code.append(context.start_label + ":");
+
+            // Check for "begin" after for loop
+            if (__current_token_index < tokens.size() && tokens[__current_token_index].value() == "begin") {
+                __current_token_index++; // Skip "begin"
             }
         }
     }
 
-    void handleIdentifier(const Lexema& token, int index, const QList<Lexema>& tokens) {
-        // Mostly handled in other contexts
+    void processAssignment(const QList<Lexema>& tokens) {
+        if (__current_token_index + 3 < tokens.size() &&
+            tokens[__current_token_index + 2].value() == "=") {
+
+            QString var_name = tokens[__current_token_index + 1].value();
+            QString expr = extractExpression(__current_token_index + 3, tokens);
+
+            generateAssignmentCode(var_name, expr);
+
+            __current_token_index += 4; // Skip "let", var, "=", and expr
+        } else {
+            __current_token_index++;
+        }
     }
 
-    void handleConstant(const Lexema& token, int index, const QList<Lexema>& tokens) {
-        // Mostly handled in other contexts
+    void processAssignmentFromString(const QString& assignment) {
+        QStringList parts = assignment.split(" ", Qt::SkipEmptyParts);
+
+        if (parts.size() >= 3 && parts[1] == "=") {
+            QString var_name = parts[0];
+            if (parts[0] == "let" && parts.size() >= 4) {
+                var_name = parts[1];
+            }
+
+            QString expr = "";
+            for (int i = 2; i < parts.size(); i++) {
+                expr += parts[i] + " ";
+            }
+            expr = expr.trimmed();
+
+            generateAssignmentCode(var_name, expr);
+        }
+    }
+
+    void processInput(const QList<Lexema>& tokens) {
+        if (__current_token_index + 3 < tokens.size() &&
+            tokens[__current_token_index + 1].value() == "(") {
+
+            QString var_name = tokens[__current_token_index + 2].value();
+            generateInputCode(var_name);
+
+            __current_token_index += 4; // Skip "input", "(", var, ")"
+        } else {
+            __current_token_index++;
+        }
+    }
+
+    void processOutput(const QList<Lexema>& tokens) {
+        if (__current_token_index + 3 < tokens.size() &&
+            tokens[__current_token_index + 1].value() == "(") {
+
+            QString expr = extractExpression(__current_token_index + 2, tokens);
+            generateOutputCode(expr);
+
+            __current_token_index += 4; // Skip "output", "(", expr, ")"
+        } else {
+            __current_token_index++;
+        }
+    }
+
+    QString extractCondition(const QList<Lexema>& tokens) {
+        QString condition = "";
+        int paren_count = 1;
+
+        while (__current_token_index < tokens.size() && paren_count > 0) {
+            if (tokens[__current_token_index].value() == "(") {
+                paren_count++;
+            } else if (tokens[__current_token_index].value() == ")") {
+                paren_count--;
+                if (paren_count == 0) {
+                    break;
+                }
+            }
+
+            if (paren_count == 1) {
+                condition += tokens[__current_token_index].value() + " ";
+            }
+
+            __current_token_index++;
+        }
+
+        return condition.trimmed();
+    }
+
+    QString extractExpression(int start_index, const QList<Lexema>& tokens) {
+        QString expr = "";
+        int i = start_index;
+        int paren_count = 0;
+
+        while (i < tokens.size()) {
+            QString val = tokens[i].value();
+
+            if (val == "(") {
+                paren_count++;
+            } else if (val == ")") {
+                if (paren_count == 0) {
+                    break;
+                }
+                paren_count--;
+            } else if (val == ";" && paren_count == 0) {
+                break;
+            }
+
+            expr += val + " ";
+            i++;
+        }
+
+        return expr.trimmed();
+    }
+
+    void closeCurrentBlock() {
+        // Close loops first
+        if (!__loop_contexts.isEmpty()) {
+            LoopContext context = __loop_contexts.top();
+
+            if (context.is_for_loop && !context.increment_code.isEmpty() && context.increment_code != "1") {
+                // Generate increment code for for-loop
+                __generated_code.append("    ; For loop increment");
+                processAssignmentFromString(context.increment_code);
+            }
+
+            __generated_code.append("    jmp " + context.condition_label);
+            __generated_code.append(context.end_label + ":");
+            __generated_code.append("    ; Loop end");
+
+            __loop_contexts.pop();
+            __loop_depth--;
+        }
+
+        // Close if statements
+        if (!__if_labels.isEmpty()) {
+            QString end_if_label = __if_labels.pop();
+            __generated_code.append(end_if_label + ":");
+            __generated_code.append("    ; End if/else");
+            __if_depth--;
+        }
+    }
+
+    void closeAllBlocks() {
+        while (!__loop_contexts.isEmpty()) {
+            closeCurrentBlock();
+        }
+
+        while (!__if_labels.isEmpty()) {
+            QString end_if_label = __if_labels.pop();
+            __generated_code.append(end_if_label + ":");
+            __generated_code.append("    ; End if/else");
+        }
     }
 
     void generateInputCode(const QString& var_name) {
-        QString temp_label = getNextLabel();
-
         __generated_code.append("");
-        __generated_code.append("    ; Input to " + var_name);
-        __generated_code.append("    push dword " + var_name + "  ; push variable address");
-        __generated_code.append("    push dword 10             ; buffer size");
-        __generated_code.append("    call read_input");
-        __generated_code.append("    add esp, 8               ; clean stack");
-        __generated_code.append("    mov [" + var_name + "], eax  ; store result");
+        __generated_code.append(QString("    ; Input to %1").arg(var_name));
+
+        // Simple inline input (without function call for simplicity)
+        __generated_code.append(QString("    mov eax, 3          ; sys_read"));
+        __generated_code.append(QString("    mov ebx, 0          ; stdin"));
+        __generated_code.append(QString("    mov ecx, input_buffer"));
+        __generated_code.append(QString("    mov edx, 12         ; buffer size"));
+        __generated_code.append(QString("    int 0x80"));
+        __generated_code.append(QString("    "));
+        __generated_code.append(QString("    ; Convert string to integer"));
+        __generated_code.append(QString("    mov esi, input_buffer"));
+        __generated_code.append(QString("    xor eax, eax"));
+        __generated_code.append(QString("    xor ebx, ebx"));
+        __generated_code.append(QString("    mov ecx, 10"));
+        __generated_code.append(QString("convert_input:"));
+        __generated_code.append(QString("    mov bl, [esi]"));
+        __generated_code.append(QString("    cmp bl, 0"));
+        __generated_code.append(QString("    je convert_input_done"));
+        __generated_code.append(QString("    cmp bl, 10         ; newline"));
+        __generated_code.append(QString("    je convert_input_done"));
+        __generated_code.append(QString("    sub bl, '0'"));
+        __generated_code.append(QString("    imul eax, ecx"));
+        __generated_code.append(QString("    add eax, ebx"));
+        __generated_code.append(QString("    inc esi"));
+        __generated_code.append(QString("    jmp convert_input"));
+        __generated_code.append(QString("convert_input_done:"));
+        __generated_code.append(QString("    mov [%1], eax").arg(var_name));
     }
 
     void generateOutputCode(const QString& expr) {
         __generated_code.append("");
-        __generated_code.append("    ; Output " + expr);
+        __generated_code.append(QString("    ; Output %1").arg(expr));
 
-        // Check if expr is a constant or variable
-        bool is_number;
-        expr.toInt(&is_number);
+        // Evaluate expression
+        generateExpressionCode(expr, "eax");
 
-        if (is_number) {
-            // Constant value
-            __generated_code.append("    push dword " + expr);
-        } else {
-            // Variable
-            __generated_code.append("    push dword [" + expr + "]");
-        }
-
-        __generated_code.append("    call print_number");
-        __generated_code.append("    add esp, 4               ; clean stack");
+        // Convert to string and output
+        __generated_code.append(QString("    ; Convert to string"));
+        __generated_code.append(QString("    mov ebx, 10"));
+        __generated_code.append(QString("    mov ecx, output_buffer"));
+        __generated_code.append(QString("    add ecx, 11"));
+        __generated_code.append(QString("    mov byte [ecx], 0"));
+        __generated_code.append(QString("    dec ecx"));
+        __generated_code.append(QString("    mov byte [ecx], 10  ; newline"));
+        __generated_code.append(QString("    "));
+        __generated_code.append(QString("    cmp eax, 0"));
+        __generated_code.append(QString("    jge output_positive"));
+        __generated_code.append(QString("    neg eax"));
+        __generated_code.append(QString("    mov byte [output_buffer], '-'"));
+        __generated_code.append(QString("output_positive:"));
+        __generated_code.append(QString("output_convert:"));
+        __generated_code.append(QString("    xor edx, edx"));
+        __generated_code.append(QString("    div ebx"));
+        __generated_code.append(QString("    add dl, '0'"));
+        __generated_code.append(QString("    mov [ecx], dl"));
+        __generated_code.append(QString("    dec ecx"));
+        __generated_code.append(QString("    test eax, eax"));
+        __generated_code.append(QString("    jnz output_convert"));
+        __generated_code.append(QString("    "));
+        __generated_code.append(QString("    inc ecx"));
+        __generated_code.append(QString("    mov eax, 4          ; sys_write"));
+        __generated_code.append(QString("    mov ebx, 1          ; stdout"));
+        __generated_code.append(QString("    mov edx, 12"));
+        __generated_code.append(QString("    sub edx, ecx"));
+        __generated_code.append(QString("    add edx, output_buffer"));
+        __generated_code.append(QString("    int 0x80"));
     }
 
-    void generateAssignmentCode(const QString& var_name, const QString& value) {
+    void generateAssignmentCode(const QString& var_name, const QString& expr) {
         __generated_code.append("");
-        __generated_code.append("    ; " + var_name + " = " + value);
+        __generated_code.append(QString("    ; %1 = %2").arg(var_name, expr));
 
-        bool is_number;
-        int num_value = value.toInt(&is_number);
+        generateExpressionCode(expr, "eax");
+        __generated_code.append(QString("    mov [%1], eax").arg(var_name));
+    }
 
-        if (is_number) {
-            // Direct assignment of constant
-            __generated_code.append("    mov dword [" + var_name + "], " + value);
+    void generateConditionCode(const QString& condition, const QString& false_label) {
+        __generated_code.append(QString("    ; Condition: %1").arg(condition));
+
+        // Evaluate the condition expression
+        generateExpressionCode(condition, "eax");
+
+        // Check if result is zero (false)
+        __generated_code.append(QString("    cmp eax, 0"));
+        __generated_code.append(QString("    je %1").arg(false_label));
+    }
+
+    void generateExpressionCode(const QString& expr, const QString& dest_reg) {
+        QStringList parts = expr.split(" ", Qt::SkipEmptyParts);
+
+        if (parts.size() == 1) {
+            // Single value
+            bool is_number;
+            parts[0].toInt(&is_number);
+
+            if (is_number) {
+                __generated_code.append(QString("    mov %1, %2").arg(dest_reg, parts[0]));
+            } else {
+                __generated_code.append(QString("    mov %1, [%2]").arg(dest_reg, parts[0]));
+            }
         } else {
-            // Assignment from another variable
-            __generated_code.append("    mov eax, [" + value + "]");
-            __generated_code.append("    mov [" + var_name + "], eax");
+            // Complex expression - handle common patterns
+            // For simplicity, handle basic arithmetic
+            QString simplified = expr;
+            simplified = simplified.replace("(", "").replace(")", "");
+            QStringList tokens = simplified.split(" ", Qt::SkipEmptyParts);
+
+            if (tokens.size() >= 3) {
+                QString left = tokens[0];
+                QString op = tokens[1];
+                QString right = tokens[2];
+
+                // Load left operand
+                bool left_is_number;
+                left.toInt(&left_is_number);
+
+                if (left_is_number) {
+                    __generated_code.append(QString("    mov %1, %2").arg(dest_reg, left));
+                } else {
+                    __generated_code.append(QString("    mov %1, [%2]").arg(dest_reg, left));
+                }
+
+                // Handle operation
+                bool right_is_number;
+                right.toInt(&right_is_number);
+
+                if (op == "+") {
+                    if (right_is_number) {
+                        __generated_code.append(QString("    add %1, %2").arg(dest_reg, right));
+                    } else {
+                        __generated_code.append(QString("    add %1, [%2]").arg(dest_reg, right));
+                    }
+                }
+                else if (op == "-") {
+                    if (right_is_number) {
+                        __generated_code.append(QString("    sub %1, %2").arg(dest_reg, right));
+                    } else {
+                        __generated_code.append(QString("    sub %1, [%2]").arg(dest_reg, right));
+                    }
+                }
+                else if (op == "*") {
+                    if (right_is_number) {
+                        __generated_code.append(QString("    imul %1, %2").arg(dest_reg, right));
+                    } else {
+                        __generated_code.append(QString("    imul %1, [%2]").arg(dest_reg, right));
+                    }
+                }
+                else if (op == "/") {
+                    // For a/b, we need to handle division properly
+                    __generated_code.append(QString("    cdq"));
+                    if (right_is_number) {
+                        __generated_code.append(QString("    mov ebx, %1").arg(right));
+                    } else {
+                        __generated_code.append(QString("    mov ebx, [%1]").arg(right));
+                    }
+                    __generated_code.append(QString("    idiv ebx"));
+                    __generated_code.append(QString("    mov %1, eax").arg(dest_reg));
+                }
+            } else {
+                // Simple expression - try to evaluate
+                __generated_code.append(QString("    ; Expression: %1").arg(expr));
+                __generated_code.append(QString("    mov %1, 0  ; placeholder").arg(dest_reg));
+            }
         }
     }
 
-    void generateArithmeticCode(const QString& left, const QString& op, const QString& right) {
-        QString temp_result = getNextTemp();
-
+    void generateHelperFunctions() {
+        // Add .bss section for buffers
         __generated_code.append("");
-        __generated_code.append("    ; " + left + " " + op + " " + right);
+        __generated_code.append("section .bss");
+        __generated_code.append("    input_buffer resb 12");
+        __generated_code.append("    output_buffer resb 12");
 
-        // Load left operand
-        bool left_is_number;
-        left.toInt(&left_is_number);
-
-        if (left_is_number) {
-            __generated_code.append("    mov eax, " + left);
-        } else {
-            __generated_code.append("    mov eax, [" + left + "]");
+        // Declare all variables
+        for (const QString& var : __declared_variables) {
+            __generated_code.append(QString("    %1 resd 1").arg(var));
         }
-
-        // Perform operation with right operand
-        bool right_is_number;
-        right.toInt(&right_is_number);
-
-        if (op == "+") {
-            if (right_is_number) {
-                __generated_code.append("    add eax, " + right);
-            } else {
-                __generated_code.append("    add eax, [" + right + "]");
-            }
-        }
-        else if (op == "-") {
-            if (right_is_number) {
-                __generated_code.append("    sub eax, " + right);
-            } else {
-                __generated_code.append("    sub eax, [" + right + "]");
-            }
-        }
-        else if (op == "*") {
-            if (right_is_number) {
-                __generated_code.append("    imul eax, " + right);
-            } else {
-                __generated_code.append("    imul eax, [" + right + "]");
-            }
-        }
-        else if (op == "/") {
-            __generated_code.append("    cdq");  // Sign extend EAX into EDX:EAX
-            if (right_is_number) {
-                __generated_code.append("    mov ebx, " + right);
-            } else {
-                __generated_code.append("    mov ebx, [" + right + "]");
-            }
-            __generated_code.append("    idiv ebx");
-        }
-
-        // Store result in temporary
-        __generated_code.append("    mov [" + temp_result + "], eax");
     }
 
     bool writeToFile(const QString& filename) {
@@ -289,87 +718,6 @@ private:
         }
 
         QTextStream out(&file);
-
-        // Add helper functions for I/O
-        out << "; Helper functions for I/O operations\n";
-        out << "read_input:\n";
-        out << "    ; Read integer from stdin\n";
-        out << "    push ebp\n";
-        out << "    mov ebp, esp\n";
-        out << "    sub esp, 12\n";
-        out << "    \n";
-        out << "    mov eax, 3          ; sys_read\n";
-        out << "    mov ebx, 0          ; stdin\n";
-        out << "    mov ecx, [ebp+12]   ; buffer\n";
-        out << "    mov edx, [ebp+8]    ; length\n";
-        out << "    int 0x80\n";
-        out << "    \n";
-        out << "    ; Convert string to integer\n";
-        out << "    mov esi, [ebp+12]\n";
-        out << "    xor eax, eax\n";
-        out << "    xor ebx, ebx\n";
-        out << "    xor ecx, ecx\n";
-        out << "    mov edi, 10\n";
-        out << "convert_loop:\n";
-        out << "    mov bl, [esi]\n";
-        out << "    cmp bl, 0\n";
-        out << "    je convert_done\n";
-        out << "    sub bl, '0'\n";
-        out << "    imul eax, edi\n";
-        out << "    add eax, ebx\n";
-        out << "    inc esi\n";
-        out << "    jmp convert_loop\n";
-        out << "convert_done:\n";
-        out << "    \n";
-        out << "    mov esp, ebp\n";
-        out << "    pop ebp\n";
-        out << "    ret\n";
-        out << "\n";
-
-        out << "print_number:\n";
-        out << "    ; Print integer to stdout\n";
-        out << "    push ebp\n";
-        out << "    mov ebp, esp\n";
-        out << "    sub esp, 12\n";
-        out << "    \n";
-        out << "    mov eax, [ebp+8]    ; number to print\n";
-        out << "    lea ecx, [ebp-12]   ; buffer\n";
-        out << "    mov ebx, 10\n";
-        out << "    mov edi, ecx\n";
-        out << "    add edi, 11\n";
-        out << "    mov byte [edi], 0\n";
-        out << "    dec edi\n";
-        out << "    mov byte [edi], 10  ; newline\n";
-        out << "    \n";
-        out << "    cmp eax, 0\n";
-        out << "    jge convert_pos\n";
-        out << "    neg eax\n";
-        out << "    mov byte [ecx], '-'\n";
-        out << "    inc ecx\n";
-        out << "convert_pos:\n";
-        out << "    xor edx, edx\n";
-        out << "    div ebx\n";
-        out << "    add dl, '0'\n";
-        out << "    mov [edi], dl\n";
-        out << "    dec edi\n";
-        out << "    test eax, eax\n";
-        out << "    jnz convert_pos\n";
-        out << "    \n";
-        out << "    inc edi\n";
-        out << "    mov eax, 4          ; sys_write\n";
-        out << "    mov ebx, 1          ; stdout\n";
-        out << "    mov ecx, edi\n";
-        out << "    mov edx, 12\n";
-        out << "    sub edx, edi\n";
-        out << "    add edx, [ebp-12]\n";
-        out << "    int 0x80\n";
-        out << "    \n";
-        out << "    mov esp, ebp\n";
-        out << "    pop ebp\n";
-        out << "    ret\n";
-        out << "\n";
-
-        // Write generated code
         for (const auto& line : __generated_code) {
             out << line << "\n";
         }
